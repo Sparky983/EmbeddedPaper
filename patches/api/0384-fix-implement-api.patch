@@ -1,0 +1,389 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sparky983 <87631423+Sparky983@users.noreply.github.com>
+Date: Tue, 27 Sep 2022 12:20:52 +1000
+Subject: [PATCH] fix: implement api
+
+
+diff --git a/src/main/java/org/bukkit/plugin/SimplePluginManager.java b/src/main/java/org/bukkit/plugin/SimplePluginManager.java
+index bab8bb3a52cdeef5f7052d4e3f404c42f37d117d..45c381746200cece2855f9cf4f4563fd3bcb2b65 100644
+--- a/src/main/java/org/bukkit/plugin/SimplePluginManager.java
++++ b/src/main/java/org/bukkit/plugin/SimplePluginManager.java
+@@ -6,16 +6,15 @@ import com.google.common.graph.GraphBuilder;
+ import com.google.common.graph.Graphs;
+ import com.google.common.graph.MutableGraph;
+ import java.io.File;
++import java.io.InputStream;
+ import java.lang.reflect.Constructor;
++import java.lang.reflect.InvocationTargetException;
+ import java.lang.reflect.Method;
+ import java.util.ArrayList;
+-import java.util.Collection;
+ import java.util.HashMap;
+ import java.util.HashSet;
+-import java.util.Iterator;
+ import java.util.LinkedHashMap;
+ import java.util.LinkedHashSet;
+-import java.util.LinkedList;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Set;
+@@ -40,6 +39,9 @@ import org.bukkit.event.Listener;
+ import org.bukkit.permissions.Permissible;
+ import org.bukkit.permissions.Permission;
+ import org.bukkit.permissions.PermissionDefault;
++import org.bukkit.plugin.java.EmbeddedPluginLoader;
++import org.bukkit.plugin.java.JavaPlugin;
++import org.bukkit.plugin.java.JavaPluginLoader;
+ import org.bukkit.util.FileUtil;
+ import org.jetbrains.annotations.NotNull;
+ import org.jetbrains.annotations.Nullable;
+@@ -116,13 +118,23 @@ public final class SimplePluginManager implements PluginManager {
+     @NotNull
+     public Plugin[] loadPlugins(@NotNull File directory) {
+         // Paper start - extra jars
+-        return this.loadPlugins(directory, java.util.Collections.emptyList());
++        // EmbeddedPaper start
++        throw new UnsupportedOperationException("Unable to load plugins");
++        // EmbeddedPaper end
+     }
++    // EmbeddedPaper start
+     @NotNull
+-    public Plugin[] loadPlugins(final @NotNull File directory, final @NotNull List<File> extraPluginJars) {
++    public Plugin[] loadEmbeddedPlugin(final @NotNull File directory, final @NotNull File pluginFile) {
+         // Paper end
+         Validate.notNull(directory, "Directory cannot be null");
+-        Validate.isTrue(directory.isDirectory(), "Directory must be a directory");
++        try {
++            final Plugin embeddedPlugin =  new EmbeddedPluginLoader(server).loadPlugin(pluginFile);
++            plugins.add(embeddedPlugin);
++            return new Plugin[] { embeddedPlugin };
++        } catch (InvalidPluginException e) {
++            throw new RuntimeException(e);
++        }
++        /* Validate.isTrue(directory.isDirectory(), "Directory must be a directory");
+ 
+         List<Plugin> result = new ArrayList<Plugin>();
+         Set<Pattern> filters = fileAssociations.keySet();
+@@ -380,7 +392,8 @@ public final class SimplePluginManager implements PluginManager {
+             }
+         }
+ 
+-        return result.toArray(new Plugin[result.size()]);
++        return result.toArray(new Plugin[result.size()]);*/
++        // EmbeddedPaper end
+     }
+ 
+     /**
+diff --git a/src/main/java/org/bukkit/plugin/java/EmbeddedPluginLoader.java b/src/main/java/org/bukkit/plugin/java/EmbeddedPluginLoader.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..661957aa0b03fee02d054786d0bd3886e7e6433d
+--- /dev/null
++++ b/src/main/java/org/bukkit/plugin/java/EmbeddedPluginLoader.java
+@@ -0,0 +1,220 @@
++package org.bukkit.plugin.java;
++
++import org.apache.commons.lang.Validate;
++import org.bukkit.Server;
++import org.bukkit.UnsafeValues;
++import org.bukkit.Warning;
++import org.bukkit.event.Event;
++import org.bukkit.event.EventHandler;
++import org.bukkit.event.Listener;
++import org.bukkit.event.server.PluginDisableEvent;
++import org.bukkit.event.server.PluginEnableEvent;
++import org.bukkit.plugin.AuthorNagException;
++import org.bukkit.plugin.EventExecutor;
++import org.bukkit.plugin.InvalidDescriptionException;
++import org.bukkit.plugin.InvalidPluginException;
++import org.bukkit.plugin.Plugin;
++import org.bukkit.plugin.PluginDescriptionFile;
++import org.bukkit.plugin.PluginLoader;
++import org.bukkit.plugin.RegisteredListener;
++import org.bukkit.plugin.UnknownDependencyException;
++import org.jetbrains.annotations.NotNull;
++
++import java.io.File;
++import java.io.InputStream;
++import java.lang.reflect.InvocationTargetException;
++import java.lang.reflect.Method;
++import java.util.Arrays;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.Map;
++import java.util.Set;
++import java.util.logging.Level;
++import java.util.regex.Pattern;
++
++import co.aikar.timings.TimedEventExecutor;
++
++public class EmbeddedPluginLoader implements PluginLoader {
++
++    private final Server server;
++
++    public EmbeddedPluginLoader(final @NotNull Server server) {
++
++        this.server = server;
++    }
++
++    @Override
++    public @NotNull Plugin loadPlugin(final @NotNull File file)
++        throws InvalidPluginException, UnknownDependencyException {
++
++        PluginDescriptionFile description = getPluginDescription(file);
++
++        JavaPlugin plugin;
++
++        try {
++            Class<?> pluginClass = getClass().getClassLoader().loadClass(description.getMain());
++
++            Class<? extends JavaPlugin> javaPluginClass = pluginClass.asSubclass(JavaPlugin.class);
++
++            plugin = javaPluginClass.getConstructor().newInstance();
++        } catch (ClassNotFoundException | InvocationTargetException |
++                 InstantiationException e) {
++            throw new RuntimeException(e);
++        } catch (IllegalAccessException | NoSuchMethodException e) {
++            throw new RuntimeException("Plugin must have a public constructor", e);
++        }
++
++        plugin.init(
++            this,
++            server,
++            description,
++            new File(server.getPluginsFolder(), description.getName()),
++            file,
++            getClass().getClassLoader()
++        );
++
++        return plugin;
++    }
++
++    @Override
++    public @NotNull PluginDescriptionFile getPluginDescription(final @NotNull File file) {
++
++        try {
++            InputStream inputStream = getClass().getClassLoader().getResourceAsStream("plugin.yml");
++            if (inputStream == null) {
++                throw new RuntimeException("Cannot find plugin.yml");
++            }
++            return new PluginDescriptionFile(inputStream);
++        } catch (InvalidDescriptionException e) {
++            throw new RuntimeException(e);
++        }
++    }
++
++    @Override
++    public @NotNull Pattern[] getPluginFileFilters() {
++
++        return new Pattern[0];
++    }
++
++    @Override
++    public @NotNull Map<Class<? extends Event>, Set<RegisteredListener>> createRegisteredListeners(
++        final @NotNull Listener listener, final @NotNull Plugin plugin) {
++
++        Validate.notNull(plugin, "Plugin can not be null");
++        Validate.notNull(listener, "Listener can not be null");
++
++        final Map<Class<? extends Event>, Set<RegisteredListener>> ret = new HashMap<>();
++        final Set<Method> methods;
++
++        try {
++            Method[] publicMethods = listener.getClass().getMethods();
++            Method[] privateMethods = listener.getClass().getDeclaredMethods();
++            methods = new HashSet<>(publicMethods.length + privateMethods.length, 1.0F);
++            methods.addAll(Arrays.asList(publicMethods));
++            methods.addAll(Arrays.asList(privateMethods));
++        } catch (final NoClassDefFoundError e) {
++            plugin.getLogger().severe("Plugin " + plugin.getDescription().getFullName() + " has failed to register events for " + listener.getClass() + " because " + e.getMessage() + " does not exist.");
++            return ret;
++        }
++
++        for (final Method method : methods) {
++            final EventHandler eventHandler = method.getAnnotation(EventHandler.class);
++
++            if (eventHandler == null || method.isBridge() || method.isSynthetic()) {
++                continue;
++            }
++
++            final Class<?> checkClass;
++
++            if (method.getParameterTypes().length != 1 || !Event.class.isAssignableFrom(checkClass = method.getParameterTypes()[0])) {
++                plugin.getLogger().severe(plugin.getDescription().getFullName() + " attempted to register an invalid EventHandler method signature \"" + method.toGenericString() + "\" in " + listener.getClass());
++                continue;
++            }
++
++            final Class<? extends Event> eventClass = checkClass.asSubclass(Event.class);
++
++            method.setAccessible(true);
++
++            Set<RegisteredListener> eventSet = ret.get(eventClass);
++
++            if (eventSet == null) {
++                eventSet = new HashSet<>();
++                ret.put(eventClass, eventSet);
++            }
++
++            for (Class<?> clazz = eventClass; Event.class.isAssignableFrom(clazz); clazz = clazz.getSuperclass()) {
++                // This loop checks for extending deprecated events
++                if (clazz.getAnnotation(Deprecated.class) != null) {
++                    Warning warning = clazz.getAnnotation(Warning.class);
++                    Warning.WarningState warningState = server.getWarningState();
++                    if (!warningState.printFor(warning)) {
++                        break;
++                    }
++                    plugin.getLogger().log(
++                        Level.WARNING,
++                        String.format(
++                            "\"%s\" has registered a listener for %s on method \"%s\", but the event is Deprecated. \"%s\"; please notify the authors %s.",
++                            plugin.getDescription().getFullName(),
++                            clazz.getName(),
++                            method.toGenericString(),
++                            (warning != null && warning.reason().length() != 0) ? warning.reason() : "Server performance will be affected",
++                            Arrays.toString(plugin.getDescription().getAuthors().toArray())),
++                        warningState == Warning.WarningState.ON ? new AuthorNagException(null) : null);
++                    break;
++                }
++            }
++
++            EventExecutor executor = new TimedEventExecutor(EventExecutor.create(method, eventClass), plugin, method, eventClass);
++            eventSet.add(new RegisteredListener(listener, executor, eventHandler.priority(), plugin, eventHandler.ignoreCancelled()));
++        }
++        return ret;
++    }
++
++    @Override
++    public void enablePlugin(final @NotNull Plugin plugin) {
++
++        if (!(plugin instanceof JavaPlugin javaPlugin)) {
++            throw new IllegalArgumentException("Plugin is not associated with this PluginLoader");
++        }
++
++        if (!plugin.isEnabled()) {
++
++            String enableMsg = "Enabling " + plugin.getDescription().getFullName();
++            if (UnsafeValues.isLegacyPlugin(plugin)) {
++                enableMsg += "*";
++            }
++
++            plugin.getLogger().info(enableMsg);
++
++            try {
++                javaPlugin.setEnabled(true);
++            } catch (final Exception e) {
++                server.getLogger().log(Level.SEVERE, "Error occurred while enabling " + plugin.getDescription().getFullName() + " (Is it up to date?)", e);
++                this.server.getPluginManager().disablePlugin(javaPlugin);
++                return;
++            }
++
++            server.getPluginManager().callEvent(new PluginEnableEvent(plugin));
++        }
++    }
++
++    @Override
++    public void disablePlugin(final @NotNull Plugin plugin) {
++
++        if (!(plugin instanceof JavaPlugin javaPlugin)) {
++            throw new IllegalArgumentException("Plugin is not associated with this PluginLoader");
++        }
++
++        if (plugin.isEnabled()) {
++            plugin.getLogger().info("Disabling" + plugin.getDescription().getFullName());
++
++            server.getPluginManager().callEvent(new PluginDisableEvent(plugin));
++
++            try {
++                javaPlugin.setEnabled(false);
++            } catch (final Exception e) {
++                server.getLogger().log(Level.SEVERE, "Error occurred while disabling " + plugin.getDescription().getFullName() + " (Is it up to date?)", e);
++            }
++        }
++    }
++}
+diff --git a/src/main/java/org/bukkit/plugin/java/JavaPlugin.java b/src/main/java/org/bukkit/plugin/java/JavaPlugin.java
+index c943bd801b54519ba6cf5d45aec593d7b7438f99..e6c4a146b57719ef63cc81e479673141885adb52 100644
+--- a/src/main/java/org/bukkit/plugin/java/JavaPlugin.java
++++ b/src/main/java/org/bukkit/plugin/java/JavaPlugin.java
+@@ -10,10 +10,14 @@ import java.io.OutputStream;
+ import java.io.Reader;
+ import java.net.URL;
+ import java.net.URLConnection;
++import java.util.Arrays;
+ import java.util.List;
+ import java.util.logging.Level;
+ import java.util.logging.Logger;
++import java.util.stream.Stream;
++
+ import org.apache.commons.lang.Validate;
++import org.bukkit.Bukkit;
+ import org.bukkit.Server;
+ import org.bukkit.command.Command;
+ import org.bukkit.command.CommandSender;
+@@ -22,10 +26,12 @@ import org.bukkit.configuration.file.FileConfiguration;
+ import org.bukkit.configuration.file.YamlConfiguration;
+ import org.bukkit.generator.BiomeProvider;
+ import org.bukkit.generator.ChunkGenerator;
++import org.bukkit.plugin.Plugin;
+ import org.bukkit.plugin.PluginBase;
+ import org.bukkit.plugin.PluginDescriptionFile;
+ import org.bukkit.plugin.PluginLoader;
+ import org.bukkit.plugin.PluginLogger;
++import org.jetbrains.annotations.ApiStatus;
+ import org.jetbrains.annotations.NotNull;
+ import org.jetbrains.annotations.Nullable;
+ 
+@@ -46,11 +52,13 @@ public abstract class JavaPlugin extends PluginBase {
+     Logger logger = null; // Paper - PluginLogger -> Logger, package-private
+ 
+     public JavaPlugin() {
+-        final ClassLoader classLoader = this.getClass().getClassLoader();
++        // EmbeddedPaper start
++        /* final ClassLoader classLoader = this.getClass().getClassLoader();
+         if (!(classLoader instanceof PluginClassLoader)) {
+             throw new IllegalStateException("JavaPlugin requires " + PluginClassLoader.class.getName());
+         }
+-        ((PluginClassLoader) classLoader).initialize(this);
++        ((PluginClassLoader) classLoader).initialize(this); */
++        // EmbeddedPaper end
+     }
+ 
+     protected JavaPlugin(@NotNull final JavaPluginLoader loader, @NotNull final PluginDescriptionFile description, @NotNull final File dataFolder, @NotNull final File file) {
+@@ -268,8 +276,7 @@ public abstract class JavaPlugin extends PluginBase {
+         }
+     }
+ 
+-
+-    final void init(@NotNull PluginLoader loader, @NotNull Server server, @NotNull PluginDescriptionFile description, @NotNull File dataFolder, @NotNull File file, @NotNull ClassLoader classLoader) {
++    public final void init(@NotNull PluginLoader loader, @NotNull Server server, @NotNull PluginDescriptionFile description, @NotNull File dataFolder, @NotNull File file, @NotNull ClassLoader classLoader) {
+         this.loader = loader;
+         this.server = server;
+         this.file = file;
+@@ -397,15 +404,23 @@ public abstract class JavaPlugin extends PluginBase {
+         if (!JavaPlugin.class.isAssignableFrom(clazz)) {
+             throw new IllegalArgumentException(clazz + " does not extend " + JavaPlugin.class);
+         }
+-        final ClassLoader cl = clazz.getClassLoader();
++        // EmbeddedPaper start
++        /* final ClassLoader cl = clazz.getClassLoader();
+         if (!(cl instanceof PluginClassLoader)) {
+             throw new IllegalArgumentException(clazz + " is not initialized by " + PluginClassLoader.class);
+         }
+-        JavaPlugin plugin = ((PluginClassLoader) cl).plugin;
+-        if (plugin == null) {
+-            throw new IllegalStateException("Cannot get plugin for " + clazz + " from a static initializer");
++        JavaPlugin plugin = ((PluginClassLoader) cl).plugin; */
++
++        for (Plugin plugin : Bukkit.getServer().getPluginManager().getPlugins()) {
++            if (!clazz.isInstance(plugin)) {
++                continue;
++            }
++
++            return clazz.cast(plugin);
+         }
+-        return clazz.cast(plugin);
++
++        throw new IllegalStateException("Cannot get plugin for " + clazz + " from a static initializer");
++        // EmbeddedPaper end
+     }
+ 
+     /**
